@@ -1,0 +1,7 @@
+.env
+.DS_Store
+backups/
+bin/
+tmp/
+coverage.out
+*.csv

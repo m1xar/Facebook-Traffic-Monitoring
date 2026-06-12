@@ -1,0 +1,12 @@
+.git
+.env
+.env.example
+.DS_Store
+tmp
+bin
+coverage.out
+postgres_data
+backups
+docs
+*.csv
+README.md

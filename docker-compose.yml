@@ -1,0 +1,58 @@
+services:
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://meta:${POSTGRES_PASSWORD:-meta}@postgres:5432/meta_tracking?sslmode=disable
+      REDIS_ADDR: redis:6379
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+    restart: unless-stopped
+    command: ["/app/worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://meta:${POSTGRES_PASSWORD:-meta}@postgres:5432/meta_tracking?sslmode=disable
+      REDIS_ADDR: redis:6379
+      WORKER_MODE: all
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: meta
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meta}
+      POSTGRES_DB: meta_tracking
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meta -d meta_tracking"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+
+volumes:
+  postgres_data:
