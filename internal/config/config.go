@@ -24,6 +24,8 @@ type Config struct {
 	TelegramBotToken   string
 	TelegramChatID     string
 	SyncInterval       time.Duration
+	SyncBatchSize      int
+	SyncBatchDelay     time.Duration
 }
 
 func Load() (Config, error) {
@@ -57,6 +59,28 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("SYNC_INTERVAL must be at least 1m")
 		}
 		cfg.SyncInterval = interval
+	}
+	cfg.SyncBatchSize = 60
+	if raw := os.Getenv("SYNC_BATCH_SIZE"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse SYNC_BATCH_SIZE: %w", err)
+		}
+		if n < 1 {
+			return Config{}, fmt.Errorf("SYNC_BATCH_SIZE must be at least 1")
+		}
+		cfg.SyncBatchSize = n
+	}
+	cfg.SyncBatchDelay = 10 * time.Minute
+	if raw := os.Getenv("SYNC_BATCH_DELAY"); raw != "" {
+		delay, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse SYNC_BATCH_DELAY: %w", err)
+		}
+		if delay < time.Minute {
+			return Config{}, fmt.Errorf("SYNC_BATCH_DELAY must be at least 1m")
+		}
+		cfg.SyncBatchDelay = delay
 	}
 
 	if db := os.Getenv("REDIS_DB"); db != "" {

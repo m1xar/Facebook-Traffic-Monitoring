@@ -42,7 +42,7 @@ func main() {
 		WithOAuth(cfg.MetaAppID, cfg.MetaAppSecret, cfg.MetaOAuthRedirect, cfg.MetaOAuthScopes)
 	asynqClient := asynq.NewClient(worker.RedisClientOpt(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB))
 	defer asynqClient.Close()
-	server := apihttp.NewServer(store, metaClient, tokenCipher, cfg.JWTSecret, asynqClient, cfg.SyncInterval)
+	server := apihttp.NewServer(store, metaClient, tokenCipher, cfg.JWTSecret, asynqClient, cfg.SyncBatchDelay)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

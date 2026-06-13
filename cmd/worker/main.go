@@ -50,7 +50,7 @@ func main() {
 	if mode == "scheduler" || mode == "all" {
 		client := asynq.NewClient(redisOpt)
 		defer client.Close()
-		scheduler := worker.NewScheduler(store, client, telegramClient, cfg.SyncInterval)
+		scheduler := worker.NewScheduler(store, client, telegramClient, cfg.SyncBatchDelay)
 		go func() {
 			if err := scheduler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("scheduler stopped: %v", err)
@@ -61,7 +61,7 @@ func main() {
 	if mode == "server" || mode == "all" {
 		server := asynq.NewServer(redisOpt, asynq.Config{Concurrency: 5})
 		mux := asynq.NewServeMux()
-		processor := worker.NewProcessor(store, metaClient, tokenCipher, telegramClient)
+		processor := worker.NewProcessor(store, metaClient, tokenCipher, telegramClient, cfg.SyncBatchSize)
 		processor.Register(mux)
 		go func() {
 			if err := server.Run(mux); err != nil {

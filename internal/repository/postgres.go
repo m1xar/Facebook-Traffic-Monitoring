@@ -455,6 +455,92 @@ func (s *Store) TrackedPrimaryAccountsForProfile(ctx context.Context, profileID 
 	return accounts, rows.Err()
 }
 
+// NextTrackedPrimaryAccountBatchForProfile returns the next ordered chunk of
+// tracked accounts for a profile and advances a persistent round-robin cursor.
+func (s *Store) NextTrackedPrimaryAccountBatchForProfile(ctx context.Context, profileID int64, limit int) ([]meta.SyncAccount, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
+		SELECT a.id, COALESCE(a.timezone_name, '')
+		FROM ad_accounts a
+		JOIN fb_profile_ad_accounts fpa ON fpa.ad_account_id = a.id
+		WHERE fpa.fb_profile_id = $1
+		  AND fpa.is_primary_for_sync
+		  AND fpa.access_status = 'active'
+		  AND a.is_tracked
+		ORDER BY a.id
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	var accounts []meta.SyncAccount
+	for rows.Next() {
+		var account meta.SyncAccount
+		if err := rows.Scan(&account.ID, &account.Timezone); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		accounts = append(accounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(accounts) == 0 {
+		return nil, tx.Commit(ctx)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO sync_profile_cursors (fb_profile_id, next_offset)
+		VALUES ($1, 0)
+		ON CONFLICT (fb_profile_id) DO NOTHING
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	var offset int
+	if err := tx.QueryRow(ctx, `
+		SELECT next_offset
+		FROM sync_profile_cursors
+		WHERE fb_profile_id = $1
+		FOR UPDATE
+	`, profileID).Scan(&offset); err != nil {
+		return nil, err
+	}
+	if offset >= len(accounts) {
+		offset = 0
+	}
+	end := offset + limit
+	if end > len(accounts) {
+		end = len(accounts)
+	}
+	nextOffset := end
+	if nextOffset >= len(accounts) {
+		nextOffset = 0
+	}
+	batch := append([]meta.SyncAccount(nil), accounts[offset:end]...)
+	_, err = tx.Exec(ctx, `
+		UPDATE sync_profile_cursors
+		SET next_offset = $2, updated_at = now()
+		WHERE fb_profile_id = $1
+	`, profileID, nextOffset)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return batch, nil
+}
+
 // SaveSnapshot upserts the cumulative snapshot row and replaces its action
 // rows. Replacing (not merging) is correct because a snapshot is the full
 // cumulative state at captured_at, so a retry simply rewrites the same facts.

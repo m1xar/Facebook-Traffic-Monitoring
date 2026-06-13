@@ -1,9 +1,9 @@
 # Meta Tracking Backend
 
 Go backend for tracking Meta ad account spend by buyer assignment history.
-Admin-connected FB profiles feed a pool of ad accounts that is snapshotted
-hourly (with jitter); each snapshot stores the cumulative "today so far"
-metrics at an exact timestamp, and the frontend derives deltas.
+Admin-connected FB profiles feed a pool of ad accounts that is snapshotted in
+round-robin batches; each snapshot stores the cumulative "today so far" metrics
+at an exact timestamp, and the frontend derives deltas.
 
 ## Stack
 
@@ -73,8 +73,13 @@ Swagger UI: `GET /swagger`.
 
 ## Snapshots
 
-Every active FB profile is synced once per hour with a 5–10 minute jitter. A
-sync captures, per tracked ad account, the cumulative daily metrics at that
+Every active FB profile is synced in round-robin chunks to stay under Meta
+Marketing API development-tier limits. By default the worker processes
+`SYNC_BATCH_SIZE=60` tracked ad accounts every `SYNC_BATCH_DELAY=10m`; with 543
+accounts that is roughly a 100 minute full cycle. The cursor is persisted in
+PostgreSQL, so restarts continue from the next chunk rather than starting over.
+
+A sync captures, per tracked ad account, the cumulative daily metrics at that
 exact moment (`captured_at`): spend, impressions, clicks, reach, frequency,
 cpc, cpm, ctr as typed columns in `account_stat_snapshots`, plus conversions
 normalized into `snapshot_actions` (one row per `action_type` with `count` and

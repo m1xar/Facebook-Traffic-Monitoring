@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"time"
 
 	"meta-tracking/internal/crypto"
@@ -28,14 +27,19 @@ type Processor struct {
 	metaClient  *meta.Client
 	tokenCipher *crypto.TokenCipher
 	telegram    *telegram.Client
+	batchSize   int
 }
 
-func NewProcessor(store *repository.Store, metaClient *meta.Client, tokenCipher *crypto.TokenCipher, telegramClient *telegram.Client) *Processor {
+func NewProcessor(store *repository.Store, metaClient *meta.Client, tokenCipher *crypto.TokenCipher, telegramClient *telegram.Client, batchSize int) *Processor {
+	if batchSize < 1 {
+		batchSize = 1
+	}
 	return &Processor{
 		store:       store,
 		metaClient:  metaClient,
 		tokenCipher: tokenCipher,
 		telegram:    telegramClient,
+		batchSize:   batchSize,
 	}
 }
 
@@ -51,26 +55,29 @@ func (p *Processor) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(TypeSyncProfile, p.HandleSyncProfile)
 }
 
-// EnqueueSyncProfile enqueues a sync task for one profile. Uniqueness spans
-// just under the sync interval, so an immediate post-connect sync and the
-// scheduler can never stack duplicate tasks for the same profile.
-func EnqueueSyncProfile(ctx context.Context, client *asynq.Client, profileID int64, delay, syncInterval time.Duration) error {
+// EnqueueSyncProfile enqueues one round-robin sync chunk for a profile.
+// Uniqueness spans just under the scheduler cadence, so a slow tick cannot
+// stack duplicate chunks for the same profile.
+func EnqueueSyncProfile(ctx context.Context, client *asynq.Client, profileID int64, delay, cadence time.Duration) error {
 	task, err := NewSyncProfileTask(profileID)
 	if err != nil {
 		return err
 	}
 	_, err = client.EnqueueContext(ctx, task,
-		asynq.ProcessIn(delay), asynq.MaxRetry(5), asynq.Timeout(10*time.Minute), asynq.Unique(uniqueWindow(syncInterval)))
+		asynq.ProcessIn(delay), asynq.MaxRetry(5), asynq.Timeout(10*time.Minute), asynq.Unique(uniqueWindow(cadence)))
 	if errors.Is(err, asynq.ErrDuplicateTask) {
 		return nil
 	}
 	return err
 }
 
-// uniqueWindow is the task-uniqueness TTL: just under the sync interval
-// (1h -> 55m), so the next scheduler tick is never blocked by its own lock.
-func uniqueWindow(syncInterval time.Duration) time.Duration {
-	return syncInterval - syncInterval/12
+// uniqueWindow is the task-uniqueness TTL: just under the scheduler cadence
+// (10m -> 9m10s), so the next intended tick is never blocked by its own lock.
+func uniqueWindow(cadence time.Duration) time.Duration {
+	if cadence <= time.Minute {
+		return cadence
+	}
+	return cadence - cadence/12
 }
 
 func (p *Processor) HandleSyncProfile(ctx context.Context, task *asynq.Task) error {
@@ -87,7 +94,7 @@ func (p *Processor) HandleSyncProfile(ctx context.Context, task *asynq.Task) err
 		return nil
 	}
 
-	accounts, err := p.store.TrackedPrimaryAccountsForProfile(ctx, profile.ID)
+	accounts, err := p.store.NextTrackedPrimaryAccountBatchForProfile(ctx, profile.ID, p.batchSize)
 	if err != nil {
 		return err
 	}
@@ -101,6 +108,7 @@ func (p *Processor) HandleSyncProfile(ctx context.Context, task *asynq.Task) err
 	}
 
 	capturedAt := time.Now().UTC()
+	log.Printf("sync profile %d: syncing %d account(s)", profile.ID, len(accounts))
 	snapshots, failed, err := p.metaClient.InsightSnapshots(ctx, token, accounts, capturedAt)
 	if err != nil {
 		return p.handleSyncError(ctx, profile, err)
@@ -218,11 +226,7 @@ func (s *Scheduler) enqueueOnce(ctx context.Context) error {
 		return err
 	}
 	for _, profile := range profiles {
-		// Jitter inside [interval/12, interval/6] (1h -> 5-10 min) so
-		// profiles do not hit Meta at the same instant every tick.
-		minDelay := s.interval / 12
-		delay := minDelay + time.Duration(rand.Int63n(int64(minDelay)+1))
-		if err := EnqueueSyncProfile(ctx, s.client, profile.ID, delay, s.interval); err != nil {
+		if err := EnqueueSyncProfile(ctx, s.client, profile.ID, 0, s.interval); err != nil {
 			return err
 		}
 	}
