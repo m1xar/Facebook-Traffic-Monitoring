@@ -102,6 +102,18 @@ func (s *Server) routes() {
 		anyRole.Get("/snapshots", s.listSnapshots)
 
 		admin.Get("/alerts", s.listAlerts)
+
+		anyRole.Get("/analytics/summary", s.analyticsSummary)
+		anyRole.Get("/analytics/timeseries", s.analyticsTimeseries)
+		anyRole.Get("/analytics/ad-accounts", s.analyticsAdAccounts)
+		anyRole.Get("/analytics/ad-accounts/{id}", s.analyticsAdAccountDetail)
+		anyRole.Get("/analytics/actions", s.analyticsActions)
+		anyRole.Get("/analytics/compare", s.analyticsCompare)
+		anyRole.Get("/analytics/pacing", s.analyticsPacing)
+		anyRole.Get("/analytics/freshness", s.analyticsFreshness)
+		anyRole.Get("/analytics/issues", s.analyticsIssues)
+		anyRole.Get("/analytics/export.csv", s.analyticsExportCSV)
+		anyRole.Get("/analytics/buyers", s.analyticsBuyers)
 	})
 }
 

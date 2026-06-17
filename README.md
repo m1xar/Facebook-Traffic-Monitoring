@@ -71,6 +71,34 @@ goose -dir migrations postgres "$DATABASE_URL" up
 All `/api/*` endpoints require `Authorization: Bearer <jwt>`.
 Swagger UI: `GET /swagger`.
 
+## Analytics Endpoints
+
+Raw snapshots remain available for debugging, but frontends should prefer the
+analytics read-model endpoints below. They convert cumulative Meta snapshots
+into interval deltas, apply buyer ownership filtering server-side, and return
+derived KPIs such as CPL, CPA, ROAS, CTR, CPC, and CPM.
+
+Common query parameters:
+
+- `from`, `to` — RFC3339 interval bounds, required unless noted otherwise
+- `timezone` — IANA timezone for bucket labels and period pacing, default `UTC`
+- `granularity` — `hour` or `day`, default `hour`
+- `buyer_id`, `ad_account_id` — admin filters; buyers are always forced to their own `buyer_id`
+
+Endpoints:
+
+- `GET /api/analytics/summary` — KPI cards, account counts, freshness status
+- `GET /api/analytics/timeseries` — bucketed KPI series for charts
+- `GET /api/analytics/ad-accounts` — account performance table (`sort=spend_desc|roas_desc|cpl_asc`, `limit=`)
+- `GET /api/analytics/ad-accounts/{id}` — one-account KPI summary, actions, time series, and admin assignment history
+- `GET /api/analytics/buyers` — buyer performance leaderboard (admin only)
+- `GET /api/analytics/actions` — action_type breakdown with count, value, cost per action, and share
+- `GET /api/analytics/compare?compare_from=&compare_to=` — current vs previous KPI deltas
+- `GET /api/analytics/pacing?budget=&period=today|week|month` — budget pacing; also accepts explicit `from`/`to`
+- `GET /api/analytics/freshness` — account sync freshness and admin profile statuses
+- `GET /api/analytics/issues` — actionable sync/data quality issues
+- `GET /api/analytics/export.csv?group_by=ad_account|hour|day` — CSV export
+
 ## Snapshots
 
 Every active FB profile is synced in round-robin chunks to stay under Meta

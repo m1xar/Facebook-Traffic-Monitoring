@@ -585,12 +585,224 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/analytics/summary:
+    get:
+      summary: KPI summary built from interval deltas
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Timezone"
+        - $ref: "#/components/parameters/BuyerID"
+        - $ref: "#/components/parameters/AdAccountID"
+      responses:
+        "200":
+          description: KPI cards, account counts, and freshness status
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/analytics/timeseries:
+    get:
+      summary: Bucketed KPI time series
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Timezone"
+        - $ref: "#/components/parameters/Granularity"
+        - $ref: "#/components/parameters/BuyerID"
+        - $ref: "#/components/parameters/AdAccountID"
+      responses:
+        "200":
+          description: Hourly or daily KPI buckets
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/analytics/ad-accounts:
+    get:
+      summary: Ad account performance table
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Timezone"
+        - $ref: "#/components/parameters/BuyerID"
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [spend_desc, roas_desc, cpl_asc]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Account rows with KPIs and freshness
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/analytics/ad-accounts/{id}:
+    get:
+      summary: One ad account analytics detail
+      tags: [Analytics]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Timezone"
+        - $ref: "#/components/parameters/Granularity"
+      responses:
+        "200":
+          description: KPI summary, actions, time series, and admin assignment history
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/analytics/buyers:
+    get:
+      summary: Buyer performance leaderboard (admin only)
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Timezone"
+      responses:
+        "200":
+          description: Buyer rows with KPIs
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/analytics/actions:
+    get:
+      summary: Action type breakdown
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/BuyerID"
+        - $ref: "#/components/parameters/AdAccountID"
+      responses:
+        "200":
+          description: Action counts, values, cost per action, and share
+  /api/analytics/compare:
+    get:
+      summary: Compare current and previous ranges
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - name: compare_from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: compare_to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Current, previous, and delta KPI objects
+  /api/analytics/pacing:
+    get:
+      summary: Budget pacing for a period or explicit range
+      tags: [Analytics]
+      parameters:
+        - name: budget
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [today, week, month]
+        - $ref: "#/components/parameters/Timezone"
+      responses:
+        "200":
+          description: Spend so far, expected spend, projected spend, and pacing status
+  /api/analytics/freshness:
+    get:
+      summary: Data freshness and profile status
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/BuyerID"
+      responses:
+        "200":
+          description: Account freshness and admin profile statuses
+  /api/analytics/issues:
+    get:
+      summary: Actionable data quality and sync issues
+      tags: [Analytics]
+      responses:
+        "200":
+          description: Freshness issues and admin alerts
+  /api/analytics/export.csv:
+    get:
+      summary: CSV export of analytics KPIs
+      tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - name: group_by
+          in: query
+          schema:
+            type: string
+            enum: [ad_account, hour, day]
+      responses:
+        "200":
+          description: CSV file
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    From:
+      name: from
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date-time
+    To:
+      name: to
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date-time
+    Timezone:
+      name: timezone
+      in: query
+      required: false
+      schema:
+        type: string
+        example: Asia/Kuala_Lumpur
+    Granularity:
+      name: granularity
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [hour, day]
+    BuyerID:
+      name: buyer_id
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int64
+    AdAccountID:
+      name: ad_account_id
+      in: query
+      required: false
+      schema:
+        type: string
   responses:
     Unauthorized:
       description: Missing or invalid JWT
