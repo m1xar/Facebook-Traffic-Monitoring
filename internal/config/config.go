@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	_ "time/tzdata"
 )
 
 type Config struct {
