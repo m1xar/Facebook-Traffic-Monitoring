@@ -70,31 +70,6 @@ paths:
                   status:
                     type: string
                     example: ok
-  /api/auth/register:
-    post:
-      security: []
-      summary: Bootstrap the first admin account (works only on an empty database)
-      description: Creates the initial admin when no users exist yet. After that it always returns 403; new accounts are created by an admin via POST /api/users or POST /api/buyers.
-      tags: [Auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RegisterRequest"
-      responses:
-        "201":
-          description: Bootstrap admin created
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AuthResponse"
-        "400":
-          description: Invalid email or password
-        "403":
-          description: Users already exist, registration is disabled
-        "409":
-          description: Email already exists
   /api/auth/login:
     post:
       security: []
@@ -148,7 +123,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/RegisterRequest"
+              $ref: "#/components/schemas/AccountRequest"
       responses:
         "201":
           description: Account created
@@ -813,7 +788,7 @@ components:
     Forbidden:
       description: Role is not allowed for this action
   schemas:
-    RegisterRequest:
+    AccountRequest:
       type: object
       required: [email, password, role]
       properties:

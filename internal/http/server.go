@@ -78,7 +78,6 @@ func (s *Server) routes() {
 	s.router.Get("/oauth/facebook/callback", s.oauthCallback)
 
 	s.router.Route("/api/auth", func(r chi.Router) {
-		r.Post("/register", s.registerAccount)
 		r.Post("/login", s.login)
 		r.Post("/refresh", s.refreshToken)
 	})

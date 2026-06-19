@@ -86,7 +86,7 @@ func (p *Processor) HandleSyncProfile(ctx context.Context, task *asynq.Task) err
 		return fmt.Errorf("decode payload: %w", asynq.SkipRetry)
 	}
 
-	profile, err := p.store.ActiveProfileByID(ctx, payload.ProfileID)
+	profile, err := p.store.SyncProfileByID(ctx, payload.ProfileID)
 	if err != nil {
 		return err
 	}
@@ -225,7 +225,7 @@ func (s *Scheduler) enqueueOnce(ctx context.Context) error {
 
 	now := time.Now().UTC()
 	today := utcDate(now)
-	profiles, err := s.store.ActiveProfiles(ctx)
+	profiles, err := s.store.SyncProfiles(ctx)
 	if err != nil {
 		return err
 	}

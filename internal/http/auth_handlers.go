@@ -14,7 +14,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type registerAccountRequest struct {
+type accountRequest struct {
 	Email    string      `json:"email"`
 	Password string      `json:"password"`
 	Role     domain.Role `json:"role"`
@@ -30,46 +30,9 @@ type authResponse struct {
 	RefreshTTL   int64          `json:"refresh_token_expires_in"`
 }
 
-// registerAccount only bootstraps the very first admin on an empty database.
-// All subsequent accounts are created by an admin via POST /api/users.
-func (s *Server) registerAccount(w http.ResponseWriter, r *http.Request) {
-	var req registerAccountRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	count, err := s.store.CountAppUsers(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	if count > 0 {
-		writeError(w, http.StatusForbidden, errors.New("registration is disabled; ask an admin to create your account"))
-		return
-	}
-	// The bootstrap account is always an admin regardless of the requested role.
-	req.Role = domain.RoleAdmin
-	req.BuyerID = nil
-	if err := validateAccountInput(req.Email, req.Password, req.Role, req.BuyerID); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	user, err := s.createAppUser(r, req)
-	if err != nil {
-		writeError(w, http.StatusConflict, err)
-		return
-	}
-	resp, err := s.issueTokens(r, user)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, resp)
-}
-
 // createUser lets an admin create admin or buyer accounts.
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
-	var req registerAccountRequest
+	var req accountRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -86,7 +49,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, user)
 }
 
-func (s *Server) createAppUser(r *http.Request, req registerAccountRequest) (domain.AppUser, error) {
+func (s *Server) createAppUser(r *http.Request, req accountRequest) (domain.AppUser, error) {
 	passwordHash, err := hashPassword(req.Password)
 	if err != nil {
 		return domain.AppUser{}, err

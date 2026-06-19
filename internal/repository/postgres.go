@@ -399,11 +399,10 @@ type SyncProfile struct {
 	LastAccountResyncDate *time.Time
 }
 
-func (s *Store) ActiveProfiles(ctx context.Context) ([]SyncProfile, error) {
+func (s *Store) SyncProfiles(ctx context.Context) ([]SyncProfile, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, fb_user_id, fb_name, access_token_ciphertext, last_account_resync_date
 		FROM fb_profiles
-		WHERE status = 'active'
 		ORDER BY id
 	`)
 	if err != nil {
@@ -422,12 +421,12 @@ func (s *Store) ActiveProfiles(ctx context.Context) ([]SyncProfile, error) {
 	return profiles, rows.Err()
 }
 
-func (s *Store) ActiveProfileByID(ctx context.Context, id int64) (*SyncProfile, error) {
+func (s *Store) SyncProfileByID(ctx context.Context, id int64) (*SyncProfile, error) {
 	var profile SyncProfile
 	err := s.db.QueryRow(ctx, `
 		SELECT id, fb_user_id, fb_name, access_token_ciphertext, last_account_resync_date
 		FROM fb_profiles
-		WHERE id = $1 AND status = 'active'
+		WHERE id = $1
 	`, id).Scan(&profile.ID, &profile.FBUserID, &profile.FBName, &profile.AccessTokenCiphertext, &profile.LastAccountResyncDate)
 	if err == pgx.ErrNoRows {
 		return nil, nil

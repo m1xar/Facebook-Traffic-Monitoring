@@ -40,8 +40,7 @@ goose -dir migrations postgres "$DATABASE_URL" up
 
 ## Auth Flow
 
-1. `POST /api/auth/register` works **only on an empty database** and creates the
-   first admin (role is forced to `admin`). After that it returns 403.
+1. The first admin is inserted manually into the database.
 2. Admin creates buyers via `POST /api/buyers` (buyer record + email/password
    login in one call) and extra admins via `POST /api/users`.
 3. `POST /api/auth/login` returns an access token (15 min) and a refresh token
@@ -51,7 +50,6 @@ goose -dir migrations postgres "$DATABASE_URL" up
 ## Main Endpoints
 
 - `GET /healthz`
-- `POST /api/auth/register` — bootstrap first admin only
 - `POST /api/auth/login`, `POST /api/auth/refresh`
 - `POST /api/users` — create account (admin)
 - `POST /api/buyers` — create buyer **with CRM login** (`display_name`, `email`, `password`) (admin)

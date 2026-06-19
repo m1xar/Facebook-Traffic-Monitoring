@@ -132,12 +132,11 @@ func (s *Store) NextUpdateTimes(ctx context.Context, accountIDs []string, batchS
 			       row_number() OVER (PARTITION BY fpa.fb_profile_id ORDER BY a.id) - 1 AS account_index,
 			       count(*) OVER (PARTITION BY fpa.fb_profile_id) AS account_total
 			FROM ad_accounts a
-			JOIN fb_profile_ad_accounts fpa ON fpa.ad_account_id = a.id
-			JOIN fb_profiles fp ON fp.id = fpa.fb_profile_id
-			WHERE fp.status = 'active'
-			  AND fpa.is_primary_for_sync
-			  AND fpa.access_status = 'active'
-			  AND a.is_tracked
+				JOIN fb_profile_ad_accounts fpa ON fpa.ad_account_id = a.id
+				JOIN fb_profiles fp ON fp.id = fpa.fb_profile_id
+				WHERE fpa.is_primary_for_sync
+				  AND fpa.access_status = 'active'
+				  AND a.is_tracked
 		)
 		SELECT sa.fb_profile_id,
 		       sa.ad_account_id,
