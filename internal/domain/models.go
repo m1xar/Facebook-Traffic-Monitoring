@@ -33,26 +33,32 @@ type AppUser struct {
 }
 
 type FBProfile struct {
-	ID                    int64      `json:"id"`
-	FBUserID              string     `json:"fb_user_id"`
-	FBName                string     `json:"fb_name"`
-	AccessTokenCiphertext string     `json:"-"`
-	Status                string     `json:"status"`
-	StatusMessage         *string    `json:"status_message,omitempty"`
-	TokenExpiresAt        *time.Time `json:"token_expires_at,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	ID                     int64      `json:"id"`
+	FBUserID               string     `json:"fb_user_id"`
+	FBName                 string     `json:"fb_name"`
+	AccessTokenCiphertext  string     `json:"-"`
+	Status                 string     `json:"status"`
+	StatusMessage          *string    `json:"status_message,omitempty"`
+	TokenExpiresAt         *time.Time `json:"token_expires_at,omitempty"`
+	LastAccountResyncAt    *time.Time `json:"last_account_resync_at,omitempty"`
+	LastAccountResyncDate  *time.Time `json:"last_account_resync_date,omitempty"`
+	LastAccountResyncError *string    `json:"last_account_resync_error,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 type AdAccount struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	AccountStatus *int      `json:"account_status,omitempty"`
-	Currency      *string   `json:"currency,omitempty"`
-	TimezoneName  *string   `json:"timezone_name,omitempty"`
-	IsTracked     bool      `json:"is_tracked"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	AccountStatus  *int       `json:"account_status,omitempty"`
+	Currency       *string    `json:"currency,omitempty"`
+	TimezoneName   *string    `json:"timezone_name,omitempty"`
+	IsTracked      bool       `json:"is_tracked"`
+	ActivityStatus string     `json:"activity_status"`
+	LastUpdateAt   *time.Time `json:"last_update_at,omitempty"`
+	NextUpdateAt   *time.Time `json:"next_update_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // SnapshotMetrics is the cumulative "today so far" statistics of an ad account

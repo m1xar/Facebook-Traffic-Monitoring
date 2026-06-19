@@ -20,12 +20,13 @@ import (
 const defaultFreshnessStaleAfter = 2 * time.Hour
 
 type analyticsParams struct {
-	From        time.Time
-	To          time.Time
-	Timezone    *time.Location
-	Granularity string
-	BuyerID     *int64
-	AdAccountID *string
+	From           time.Time
+	To             time.Time
+	Timezone       *time.Location
+	Granularity    string
+	BuyerID        *int64
+	AdAccountID    *string
+	ActivityFilter repository.ActivityFilter
 }
 
 type analyticsKPIs struct {
@@ -91,6 +92,28 @@ func (a *analyticsAccumulator) add(delta analyticsDelta) {
 	}
 }
 
+func (a *analyticsAccumulator) merge(other analyticsAccumulator) {
+	a.Metrics.Spend += other.Metrics.Spend
+	a.Metrics.Impressions += other.Metrics.Impressions
+	a.Metrics.Clicks += other.Metrics.Clicks
+	a.Metrics.Reach += other.Metrics.Reach
+	a.SnapshotPoints += other.SnapshotPoints
+	for id := range other.AccountIDs {
+		a.AccountIDs[id] = struct{}{}
+	}
+	if other.LastSnapshotAt != nil && (a.LastSnapshotAt == nil || other.LastSnapshotAt.After(*a.LastSnapshotAt)) {
+		t := *other.LastSnapshotAt
+		a.LastSnapshotAt = &t
+	}
+	for key, action := range other.Actions {
+		current := a.Actions[key]
+		current.ActionType = key
+		current.Count += action.Count
+		current.Value += action.Value
+		a.Actions[key] = current
+	}
+}
+
 func (a analyticsAccumulator) kpis() analyticsKPIs {
 	leads := preferredActionCount(a.Actions, "lead", "offsite_conversion.fb_pixel_lead", "onsite_web_lead")
 	purchases := preferredActionCount(a.Actions, "purchase", "offsite_conversion.fb_pixel_purchase", "omni_purchase")
@@ -129,7 +152,7 @@ func (s *Server) analyticsSummary(w http.ResponseWriter, r *http.Request) {
 	for _, delta := range deltas {
 		acc.add(delta)
 	}
-	accounts, err := s.store.ListAdAccounts(r.Context(), params.BuyerID)
+	accounts, err := s.analyticsAccounts(r, params)
 	if err != nil {
 		s.internalError(w, err)
 		return
@@ -148,7 +171,10 @@ func (s *Server) analyticsSummary(w http.ResponseWriter, r *http.Request) {
 		"active_accounts":       len(acc.AccountIDs),
 		"visible_accounts":      len(accounts),
 		"tracked_accounts":      tracked,
+		"activity_filter":       params.ActivityFilter,
 		"last_snapshot_at":      acc.LastSnapshotAt,
+		"last_update_at":        acc.LastSnapshotAt,
+		"next_update_at":        nearestNextUpdate(accounts),
 		"data_freshness_status": freshnessStatus(acc.LastSnapshotAt, defaultFreshnessStaleAfter),
 	})
 }
@@ -181,20 +207,31 @@ func (s *Server) analyticsTimeseries(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(keys, func(i, j int) bool { return keys[i].Before(keys[j]) })
 
 	series := make([]map[string]any, 0, len(keys))
+	global := newAnalyticsAccumulator()
 	for _, key := range keys {
+		global.merge(buckets[key])
 		series = append(series, map[string]any{
 			"bucket_start":     key,
 			"kpis":             buckets[key].kpis(),
 			"active_accounts":  len(buckets[key].AccountIDs),
 			"last_snapshot_at": buckets[key].LastSnapshotAt,
+			"last_update_at":   buckets[key].LastSnapshotAt,
 		})
 	}
+	accounts, err := s.analyticsAccounts(r, params)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"from":        params.From,
-		"to":          params.To,
-		"timezone":    params.Timezone.String(),
-		"granularity": params.Granularity,
-		"series":      series,
+		"from":            params.From,
+		"to":              params.To,
+		"timezone":        params.Timezone.String(),
+		"granularity":     params.Granularity,
+		"activity_filter": params.ActivityFilter,
+		"last_update_at":  global.LastSnapshotAt,
+		"next_update_at":  nearestNextUpdate(accounts),
+		"series":          series,
 	})
 }
 
@@ -219,7 +256,7 @@ func (s *Server) analyticsAdAccounts(w http.ResponseWriter, r *http.Request) {
 		byAccount[delta.AdAccountID] = acc
 	}
 
-	accounts, err := s.store.ListAdAccounts(r.Context(), params.BuyerID)
+	accounts, err := s.analyticsAccounts(r, params)
 	if err != nil {
 		s.internalError(w, err)
 		return
@@ -234,6 +271,8 @@ func (s *Server) analyticsAdAccounts(w http.ResponseWriter, r *http.Request) {
 			"ad_account":       account,
 			"kpis":             acc.kpis(),
 			"last_snapshot_at": acc.LastSnapshotAt,
+			"last_update_at":   acc.LastSnapshotAt,
+			"next_update_at":   account.NextUpdateAt,
 			"freshness_status": freshnessStatus(acc.LastSnapshotAt, defaultFreshnessStaleAfter),
 		})
 	}
@@ -241,7 +280,12 @@ func (s *Server) analyticsAdAccounts(w http.ResponseWriter, r *http.Request) {
 	if limit := parsePositiveInt(r.URL.Query().Get("limit")); limit > 0 && limit < len(rows) {
 		rows = rows[:limit]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rows})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity_filter": params.ActivityFilter,
+		"last_update_at":  maxLastUpdate(accounts),
+		"next_update_at":  nearestNextUpdate(accounts),
+		"data":            rows,
+	})
 }
 
 func (s *Server) analyticsBuyers(w http.ResponseWriter, r *http.Request) {
@@ -274,18 +318,29 @@ func (s *Server) analyticsBuyers(w http.ResponseWriter, r *http.Request) {
 		for _, delta := range deltas {
 			acc.add(delta)
 		}
+		buyerAccounts, err := s.store.ListAdAccounts(r.Context(), &buyerID, params.ActivityFilter)
+		if err != nil {
+			s.internalError(w, err)
+			return
+		}
+		if err := s.attachNextUpdateToAdAccounts(r.Context(), buyerAccounts); err != nil {
+			s.internalError(w, err)
+			return
+		}
 		rows = append(rows, map[string]any{
 			"buyer":            buyer,
 			"kpis":             acc.kpis(),
 			"active_accounts":  len(acc.AccountIDs),
 			"last_snapshot_at": acc.LastSnapshotAt,
+			"last_update_at":   acc.LastSnapshotAt,
+			"next_update_at":   nearestNextUpdate(buyerAccounts),
 			"freshness_status": freshnessStatus(acc.LastSnapshotAt, defaultFreshnessStaleAfter),
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		return rows[i]["buyer"].(domain.Buyer).ID < rows[j]["buyer"].(domain.Buyer).ID
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"data": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"activity_filter": params.ActivityFilter, "data": rows})
 }
 
 func (s *Server) analyticsAdAccountDetail(w http.ResponseWriter, r *http.Request) {
@@ -306,15 +361,38 @@ func (s *Server) analyticsAdAccountDetail(w http.ResponseWriter, r *http.Request
 	for _, delta := range deltas {
 		acc.add(delta)
 	}
+	accounts, err := s.analyticsAccounts(r, params)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	var account any
+	var nextUpdateAt *time.Time
+	var lastUpdateAt *time.Time
+	for _, candidate := range accounts {
+		if candidate.ID == adAccountID {
+			account = candidate
+			nextUpdateAt = candidate.NextUpdateAt
+			lastUpdateAt = candidate.LastUpdateAt
+			break
+		}
+	}
+	if acc.LastSnapshotAt != nil {
+		lastUpdateAt = acc.LastSnapshotAt
+	}
 
 	detail := map[string]any{
 		"ad_account_id":    adAccountID,
+		"ad_account":       account,
 		"from":             params.From,
 		"to":               params.To,
 		"timezone":         params.Timezone.String(),
 		"kpis":             acc.kpis(),
 		"actions":          actionBreakdown(acc.Actions, acc.Metrics.Spend),
+		"activity_filter":  params.ActivityFilter,
 		"last_snapshot_at": acc.LastSnapshotAt,
+		"last_update_at":   lastUpdateAt,
+		"next_update_at":   nextUpdateAt,
 		"freshness_status": freshnessStatus(acc.LastSnapshotAt, defaultFreshnessStaleAfter),
 		"timeseries":       buildTimeseries(deltas, params),
 	}
@@ -345,7 +423,17 @@ func (s *Server) analyticsActions(w http.ResponseWriter, r *http.Request) {
 	for _, delta := range deltas {
 		acc.add(delta)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": actionBreakdown(acc.Actions, acc.Metrics.Spend)})
+	accounts, err := s.analyticsAccounts(r, params)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity_filter": params.ActivityFilter,
+		"last_update_at":  acc.LastSnapshotAt,
+		"next_update_at":  nearestNextUpdate(accounts),
+		"data":            actionBreakdown(acc.Actions, acc.Metrics.Spend),
+	})
 }
 
 func (s *Server) analyticsCompare(w http.ResponseWriter, r *http.Request) {
@@ -382,12 +470,20 @@ func (s *Server) analyticsCompare(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	accounts, err := s.analyticsAccounts(r, params)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"current":        current.kpis(),
-		"previous":       previous.kpis(),
-		"delta":          kpiDelta(current.kpis(), previous.kpis()),
-		"current_range":  map[string]time.Time{"from": params.From, "to": params.To},
-		"previous_range": map[string]time.Time{"from": compareFrom, "to": compareTo},
+		"activity_filter": params.ActivityFilter,
+		"last_update_at":  current.LastSnapshotAt,
+		"next_update_at":  nearestNextUpdate(accounts),
+		"current":         current.kpis(),
+		"previous":        previous.kpis(),
+		"delta":           kpiDelta(current.kpis(), previous.kpis()),
+		"current_range":   map[string]time.Time{"from": params.From, "to": params.To},
+		"previous_range":  map[string]time.Time{"from": compareFrom, "to": compareTo},
 	})
 }
 
@@ -427,7 +523,15 @@ func (s *Server) analyticsPacing(w http.ResponseWriter, r *http.Request) {
 	} else if acc.Metrics.Spend < expected*0.9 {
 		status = "under"
 	}
+	accounts, err := s.analyticsAccounts(r, params)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"activity_filter":        params.ActivityFilter,
+		"last_update_at":         acc.LastSnapshotAt,
+		"next_update_at":         nearestNextUpdate(accounts),
 		"budget":                 round(budget, 2),
 		"spend_so_far":           round(acc.Metrics.Spend, 2),
 		"expected_spend_by_now":  round(expected, 2),
@@ -447,12 +551,24 @@ func (s *Server) analyticsFreshness(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	items, err := s.store.AccountFreshness(r.Context(), params.BuyerID, defaultFreshnessStaleAfter)
+	items, err := s.store.AccountFreshness(r.Context(), params.BuyerID, params.ActivityFilter, defaultFreshnessStaleAfter)
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	payload := map[string]any{"accounts": items, "stale_after_seconds": int64(defaultFreshnessStaleAfter.Seconds())}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.AdAccountID)
+	}
+	nextUpdates, err := s.store.NextUpdateTimes(r.Context(), ids, s.syncBatchSize, s.syncInterval, time.Now().UTC())
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	for i := range items {
+		items[i].NextUpdateAt = nextUpdates[items[i].AdAccountID]
+	}
+	payload := map[string]any{"accounts": items, "activity_filter": params.ActivityFilter, "stale_after_seconds": int64(defaultFreshnessStaleAfter.Seconds())}
 	claims, _ := auth.FromContext(r.Context())
 	if claims.Role == domain.RoleAdmin {
 		profiles, err := s.store.ListFBProfiles(r.Context())
@@ -471,7 +587,7 @@ func (s *Server) analyticsIssues(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	freshness, err := s.store.AccountFreshness(r.Context(), params.BuyerID, defaultFreshnessStaleAfter)
+	freshness, err := s.store.AccountFreshness(r.Context(), params.BuyerID, params.ActivityFilter, defaultFreshnessStaleAfter)
 	if err != nil {
 		s.internalError(w, err)
 		return
@@ -510,7 +626,7 @@ func (s *Server) analyticsIssues(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": issues})
+	writeJSON(w, http.StatusOK, map[string]any{"activity_filter": params.ActivityFilter, "data": issues})
 }
 
 func (s *Server) analyticsExportCSV(w http.ResponseWriter, r *http.Request) {
@@ -555,6 +671,26 @@ func (s *Server) analyticsExportCSV(w http.ResponseWriter, r *http.Request) {
 	writer.Flush()
 }
 
+func (s *Server) analyticsAccounts(r *http.Request, params *analyticsParams) ([]repository.AdAccountListItem, error) {
+	accounts, err := s.store.ListAdAccounts(r.Context(), params.BuyerID, params.ActivityFilter)
+	if err != nil {
+		return nil, err
+	}
+	if params.AdAccountID != nil {
+		filtered := accounts[:0]
+		for _, account := range accounts {
+			if account.ID == *params.AdAccountID {
+				filtered = append(filtered, account)
+			}
+		}
+		accounts = filtered
+	}
+	if err := s.attachNextUpdateToAdAccounts(r.Context(), accounts); err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
 func (s *Server) analyticsAggregate(r *http.Request, params *analyticsParams) (analyticsAccumulator, error) {
 	deltas, err := s.analyticsDeltas(r, params)
 	if err != nil {
@@ -569,10 +705,11 @@ func (s *Server) analyticsAggregate(r *http.Request, params *analyticsParams) (a
 
 func (s *Server) analyticsDeltas(r *http.Request, params *analyticsParams) ([]analyticsDelta, error) {
 	snapshots, err := s.store.AnalyticsSnapshots(r.Context(), repository.AnalyticsSnapshotQuery{
-		AdAccountID: params.AdAccountID,
-		BuyerID:     params.BuyerID,
-		From:        params.From,
-		To:          params.To,
+		AdAccountID:    params.AdAccountID,
+		BuyerID:        params.BuyerID,
+		ActivityFilter: params.ActivityFilter,
+		From:           params.From,
+		To:             params.To,
 	})
 	if err != nil {
 		return nil, err
@@ -589,9 +726,14 @@ func (s *Server) parseAnalyticsParams(r *http.Request, requireRange bool) (*anal
 		}
 		loc = parsed
 	}
+	activityFilter, err := parseActivityFilter(r)
+	if err != nil {
+		return nil, err
+	}
 	params := &analyticsParams{
-		Timezone:    loc,
-		Granularity: r.URL.Query().Get("granularity"),
+		Timezone:       loc,
+		Granularity:    r.URL.Query().Get("granularity"),
+		ActivityFilter: activityFilter,
 	}
 	if params.Granularity == "" {
 		params.Granularity = "hour"

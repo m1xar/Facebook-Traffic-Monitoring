@@ -183,10 +183,13 @@ func (s *Store) UpsertFBProfile(ctx context.Context, fbUserID, fbName, tokenCiph
 			status_message = NULL,
 			token_expiry_alert_sent_at = NULL,
 			updated_at = now()
-		RETURNING id, fb_user_id, fb_name, access_token_ciphertext, status, status_message, token_expires_at, created_at, updated_at
+		RETURNING id, fb_user_id, fb_name, access_token_ciphertext, status, status_message, token_expires_at,
+		          last_account_resync_at, last_account_resync_date, last_account_resync_error, created_at, updated_at
 	`, fbUserID, fbName, tokenCiphertext, tokenExpiresAt).Scan(
 		&profile.ID, &profile.FBUserID, &profile.FBName, &profile.AccessTokenCiphertext,
-		&profile.Status, &profile.StatusMessage, &profile.TokenExpiresAt, &profile.CreatedAt, &profile.UpdatedAt,
+		&profile.Status, &profile.StatusMessage, &profile.TokenExpiresAt,
+		&profile.LastAccountResyncAt, &profile.LastAccountResyncDate, &profile.LastAccountResyncError,
+		&profile.CreatedAt, &profile.UpdatedAt,
 	)
 	return profile, err
 }
@@ -194,11 +197,14 @@ func (s *Store) UpsertFBProfile(ctx context.Context, fbUserID, fbName, tokenCiph
 func (s *Store) FBProfileByID(ctx context.Context, id int64) (*domain.FBProfile, error) {
 	var p domain.FBProfile
 	err := s.db.QueryRow(ctx, `
-		SELECT id, fb_user_id, fb_name, access_token_ciphertext, status, status_message, token_expires_at, created_at, updated_at
+		SELECT id, fb_user_id, fb_name, access_token_ciphertext, status, status_message, token_expires_at,
+		       last_account_resync_at, last_account_resync_date, last_account_resync_error, created_at, updated_at
 		FROM fb_profiles WHERE id = $1
 	`, id).Scan(
 		&p.ID, &p.FBUserID, &p.FBName, &p.AccessTokenCiphertext,
-		&p.Status, &p.StatusMessage, &p.TokenExpiresAt, &p.CreatedAt, &p.UpdatedAt,
+		&p.Status, &p.StatusMessage, &p.TokenExpiresAt,
+		&p.LastAccountResyncAt, &p.LastAccountResyncDate, &p.LastAccountResyncError,
+		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -390,11 +396,12 @@ type SyncProfile struct {
 	FBUserID              string
 	FBName                string
 	AccessTokenCiphertext string
+	LastAccountResyncDate *time.Time
 }
 
 func (s *Store) ActiveProfiles(ctx context.Context) ([]SyncProfile, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, fb_user_id, fb_name, access_token_ciphertext
+		SELECT id, fb_user_id, fb_name, access_token_ciphertext, last_account_resync_date
 		FROM fb_profiles
 		WHERE status = 'active'
 		ORDER BY id
@@ -407,7 +414,7 @@ func (s *Store) ActiveProfiles(ctx context.Context) ([]SyncProfile, error) {
 	var profiles []SyncProfile
 	for rows.Next() {
 		var profile SyncProfile
-		if err := rows.Scan(&profile.ID, &profile.FBUserID, &profile.FBName, &profile.AccessTokenCiphertext); err != nil {
+		if err := rows.Scan(&profile.ID, &profile.FBUserID, &profile.FBName, &profile.AccessTokenCiphertext, &profile.LastAccountResyncDate); err != nil {
 			return nil, err
 		}
 		profiles = append(profiles, profile)
@@ -418,10 +425,10 @@ func (s *Store) ActiveProfiles(ctx context.Context) ([]SyncProfile, error) {
 func (s *Store) ActiveProfileByID(ctx context.Context, id int64) (*SyncProfile, error) {
 	var profile SyncProfile
 	err := s.db.QueryRow(ctx, `
-		SELECT id, fb_user_id, fb_name, access_token_ciphertext
+		SELECT id, fb_user_id, fb_name, access_token_ciphertext, last_account_resync_date
 		FROM fb_profiles
 		WHERE id = $1 AND status = 'active'
-	`, id).Scan(&profile.ID, &profile.FBUserID, &profile.FBName, &profile.AccessTokenCiphertext)
+	`, id).Scan(&profile.ID, &profile.FBUserID, &profile.FBName, &profile.AccessTokenCiphertext, &profile.LastAccountResyncDate)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -596,10 +603,11 @@ func (s *Store) SaveSnapshot(ctx context.Context, snapshot domain.StatSnapshot) 
 // snapshots captured inside that buyer's ownership intervals
 // [assigned_at, unassigned_at) are returned.
 type SnapshotQuery struct {
-	AdAccountID *string
-	BuyerID     *int64
-	From        time.Time
-	To          time.Time
+	AdAccountID    *string
+	BuyerID        *int64
+	ActivityFilter ActivityFilter
+	From           time.Time
+	To             time.Time
 }
 
 func (s *Store) Snapshots(ctx context.Context, q SnapshotQuery) ([]domain.StatSnapshot, error) {
@@ -619,11 +627,13 @@ func (s *Store) Snapshots(ctx context.Context, q SnapshotQuery) ([]domain.StatSn
 			  AND (h.unassigned_at IS NULL OR s.captured_at < h.unassigned_at)
 		)`, len(args)))
 	}
+	conditions = AppendActivityFilter(conditions, &args, "a", q.ActivityFilter)
 
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT s.id, s.ad_account_id, s.captured_at, s.meta_date,
 		       s.spend, s.impressions, s.clicks, s.reach, s.frequency, s.cpc, s.cpm, s.ctr
 		FROM account_stat_snapshots s
+		JOIN ad_accounts a ON a.id = s.ad_account_id
 		WHERE %s
 		ORDER BY s.ad_account_id, s.captured_at
 	`, strings.Join(conditions, " AND ")), args...)
@@ -730,7 +740,8 @@ func (s *Store) ListBuyers(ctx context.Context) ([]domain.Buyer, error) {
 
 func (s *Store) ListFBProfiles(ctx context.Context) ([]domain.FBProfile, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, fb_user_id, fb_name, access_token_ciphertext, status, status_message, token_expires_at, created_at, updated_at
+		SELECT id, fb_user_id, fb_name, access_token_ciphertext, status, status_message, token_expires_at,
+		       last_account_resync_at, last_account_resync_date, last_account_resync_error, created_at, updated_at
 		FROM fb_profiles ORDER BY id
 	`)
 	if err != nil {
@@ -741,7 +752,10 @@ func (s *Store) ListFBProfiles(ctx context.Context) ([]domain.FBProfile, error) 
 	profiles := []domain.FBProfile{}
 	for rows.Next() {
 		var p domain.FBProfile
-		if err := rows.Scan(&p.ID, &p.FBUserID, &p.FBName, &p.AccessTokenCiphertext, &p.Status, &p.StatusMessage, &p.TokenExpiresAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(
+			&p.ID, &p.FBUserID, &p.FBName, &p.AccessTokenCiphertext, &p.Status, &p.StatusMessage, &p.TokenExpiresAt,
+			&p.LastAccountResyncAt, &p.LastAccountResyncDate, &p.LastAccountResyncError, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
 		profiles = append(profiles, p)
@@ -757,20 +771,28 @@ type AdAccountListItem struct {
 
 // ListAdAccounts returns all accounts with the currently assigned buyer.
 // When buyerID is set, only accounts currently assigned to that buyer are returned.
-func (s *Store) ListAdAccounts(ctx context.Context, buyerID *int64) ([]AdAccountListItem, error) {
+func (s *Store) ListAdAccounts(ctx context.Context, buyerID *int64, activityFilter ActivityFilter) ([]AdAccountListItem, error) {
 	args := []any{}
-	filter := ""
+	conditions := []string{}
 	if buyerID != nil {
 		args = append(args, *buyerID)
-		filter = "WHERE h.buyer_id = $1"
+		conditions = append(conditions, fmt.Sprintf("h.buyer_id = $%d", len(args)))
+	}
+	conditions = AppendActivityFilter(conditions, &args, "a", activityFilter)
+	filter := ""
+	if len(conditions) > 0 {
+		filter = "WHERE " + strings.Join(conditions, " AND ")
 	}
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT a.id, a.name, a.account_status, a.currency, a.timezone_name, a.is_tracked,
-		       a.created_at, a.updated_at, h.buyer_id, b.display_name
+		       a.activity_status, max(s.captured_at), a.created_at, a.updated_at, h.buyer_id, b.display_name
 		FROM ad_accounts a
 		LEFT JOIN buyer_account_history h ON h.ad_account_id = a.id AND h.unassigned_at IS NULL
 		LEFT JOIN buyers b ON b.id = h.buyer_id
+		LEFT JOIN account_stat_snapshots s ON s.ad_account_id = a.id
 		%s
+		GROUP BY a.id, a.name, a.account_status, a.currency, a.timezone_name, a.is_tracked,
+		         a.activity_status, a.created_at, a.updated_at, h.buyer_id, b.display_name
 		ORDER BY a.id
 	`, filter), args...)
 	if err != nil {
@@ -783,23 +805,14 @@ func (s *Store) ListAdAccounts(ctx context.Context, buyerID *int64) ([]AdAccount
 		var item AdAccountListItem
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.AccountStatus, &item.Currency, &item.TimezoneName,
-			&item.IsTracked, &item.CreatedAt, &item.UpdatedAt, &item.CurrentBuyerID, &item.CurrentBuyerName,
+			&item.IsTracked, &item.ActivityStatus, &item.LastUpdateAt, &item.CreatedAt, &item.UpdatedAt,
+			&item.CurrentBuyerID, &item.CurrentBuyerName,
 		); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, item)
 	}
 	return accounts, rows.Err()
-}
-
-func (s *Store) SetAdAccountTracked(ctx context.Context, adAccountID string, tracked bool) (bool, error) {
-	tag, err := s.db.Exec(ctx, `
-		UPDATE ad_accounts SET is_tracked = $2, updated_at = now() WHERE id = $1
-	`, adAccountID, tracked)
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
 }
 
 type Alert struct {

@@ -302,14 +302,11 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
-  /api/fb-profiles/{id}/resync:
-    post:
-      summary: Re-pull the profile's ad accounts and queue a stats sync (admin only)
+  /api/fb-profiles/{id}:
+    delete:
+      summary: Delete connected Meta profile (admin only)
       tags: [Meta Profiles]
-      description: >
-        Uses the stored token to refresh the profile's ad-account list (new
-        accounts are added to the tracking pool, known ones are updated, nothing
-        is duplicated) and enqueues an immediate stats sync.
+      description: Removes the FB profile connection. Linked profile-account rows are deleted by cascade; ad accounts and historical snapshots are preserved.
       parameters:
         - name: id
           in: path
@@ -319,23 +316,9 @@ paths:
             format: int64
       responses:
         "200":
-          description: Ad accounts refreshed
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: resynced
-                  ad_accounts:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/MetaAdAccount"
+          description: Profile deleted
         "404":
           description: Profile not found
-        "502":
-          description: Meta API request failed (token expired or revoked)
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -344,6 +327,8 @@ paths:
     get:
       summary: List ad accounts with current buyer (buyers see only their own)
       tags: [Ad Accounts]
+      parameters:
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Ad accounts with current assignment
@@ -358,32 +343,29 @@ paths:
                       $ref: "#/components/schemas/AdAccountListItem"
         "401":
           $ref: "#/components/responses/Unauthorized"
-  /api/ad-accounts/{id}:
+  /api/ad-accounts/activity-status:
     patch:
-      summary: Toggle tracking for ad account (admin only)
+      summary: Bulk update account activity status (admin only)
       tags: [Ad Accounts]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            example: act_123456789
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [is_tracked]
+              required: [ad_account_ids, activity_status]
               properties:
-                is_tracked:
-                  type: boolean
+                ad_account_ids:
+                  type: array
+                  items:
+                    type: string
+                  example: [act_123456789]
+                activity_status:
+                  type: string
+                  enum: [active, inactive]
       responses:
         "200":
-          description: Tracking flag updated
-        "404":
-          description: Ad account not found
+          description: Updated count and missing IDs
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -493,6 +475,7 @@ paths:
             type: string
             format: date-time
             example: "2026-06-11T00:00:00Z"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Snapshots in the requested window
@@ -541,6 +524,7 @@ paths:
           required: false
           schema:
             type: string
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Snapshots in the requested window
@@ -595,6 +579,7 @@ paths:
         - $ref: "#/components/parameters/Timezone"
         - $ref: "#/components/parameters/BuyerID"
         - $ref: "#/components/parameters/AdAccountID"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: KPI cards, account counts, and freshness status
@@ -611,6 +596,7 @@ paths:
         - $ref: "#/components/parameters/Granularity"
         - $ref: "#/components/parameters/BuyerID"
         - $ref: "#/components/parameters/AdAccountID"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Hourly or daily KPI buckets
@@ -625,6 +611,7 @@ paths:
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Timezone"
         - $ref: "#/components/parameters/BuyerID"
+        - $ref: "#/components/parameters/ActivityFilter"
         - name: sort
           in: query
           schema:
@@ -653,6 +640,7 @@ paths:
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Timezone"
         - $ref: "#/components/parameters/Granularity"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: KPI summary, actions, time series, and admin assignment history
@@ -666,6 +654,7 @@ paths:
         - $ref: "#/components/parameters/From"
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Timezone"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Buyer rows with KPIs
@@ -680,6 +669,7 @@ paths:
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/BuyerID"
         - $ref: "#/components/parameters/AdAccountID"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Action counts, values, cost per action, and share
@@ -702,6 +692,7 @@ paths:
           schema:
             type: string
             format: date-time
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Current, previous, and delta KPI objects
@@ -721,6 +712,7 @@ paths:
             type: string
             enum: [today, week, month]
         - $ref: "#/components/parameters/Timezone"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Spend so far, expected spend, projected spend, and pacing status
@@ -730,6 +722,7 @@ paths:
       tags: [Analytics]
       parameters:
         - $ref: "#/components/parameters/BuyerID"
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Account freshness and admin profile statuses
@@ -737,6 +730,8 @@ paths:
     get:
       summary: Actionable data quality and sync issues
       tags: [Analytics]
+      parameters:
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: Freshness issues and admin alerts
@@ -752,6 +747,7 @@ paths:
           schema:
             type: string
             enum: [ad_account, hour, day]
+        - $ref: "#/components/parameters/ActivityFilter"
       responses:
         "200":
           description: CSV file
@@ -803,6 +799,14 @@ components:
       required: false
       schema:
         type: string
+    ActivityFilter:
+      name: activity_filter
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [all, active, inactive]
+        default: all
   responses:
     Unauthorized:
       description: Missing or invalid JWT
@@ -981,6 +985,17 @@ components:
           properties:
             is_tracked:
               type: boolean
+            activity_status:
+              type: string
+              enum: [active, inactive]
+            last_update_at:
+              type: string
+              format: date-time
+              nullable: true
+            next_update_at:
+              type: string
+              format: date-time
+              nullable: true
             current_buyer_id:
               type: integer
               format: int64

@@ -1,6 +1,7 @@
 package apihttp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,25 +27,30 @@ import (
 const maxRequestBody = 1 << 20 // 1 MiB
 
 type Server struct {
-	router       chi.Router
-	store        *repository.Store
-	metaClient   *meta.Client
-	tokenCipher  *crypto.TokenCipher
-	jwtSecret    string
-	asynqClient  *asynq.Client
-	syncInterval time.Duration
+	router        chi.Router
+	store         *repository.Store
+	metaClient    *meta.Client
+	tokenCipher   *crypto.TokenCipher
+	jwtSecret     string
+	asynqClient   *asynq.Client
+	syncInterval  time.Duration
+	syncBatchSize int
 }
 
 // asynqClient may be nil; then the first sync waits for the scheduler.
-func NewServer(store *repository.Store, metaClient *meta.Client, tokenCipher *crypto.TokenCipher, jwtSecret string, asynqClient *asynq.Client, syncInterval time.Duration) *Server {
+func NewServer(store *repository.Store, metaClient *meta.Client, tokenCipher *crypto.TokenCipher, jwtSecret string, asynqClient *asynq.Client, syncInterval time.Duration, syncBatchSize int) *Server {
+	if syncBatchSize < 1 {
+		syncBatchSize = 1
+	}
 	s := &Server{
-		router:       chi.NewRouter(),
-		store:        store,
-		metaClient:   metaClient,
-		tokenCipher:  tokenCipher,
-		jwtSecret:    jwtSecret,
-		asynqClient:  asynqClient,
-		syncInterval: syncInterval,
+		router:        chi.NewRouter(),
+		store:         store,
+		metaClient:    metaClient,
+		tokenCipher:   tokenCipher,
+		jwtSecret:     jwtSecret,
+		asynqClient:   asynqClient,
+		syncInterval:  syncInterval,
+		syncBatchSize: syncBatchSize,
 	}
 	s.routes()
 	return s
@@ -90,14 +96,14 @@ func (s *Server) routes() {
 
 		admin.Get("/fb-profiles/oauth/start", s.oauthStart)
 		admin.Get("/fb-profiles", s.listFBProfiles)
-		admin.Post("/fb-profiles/{id}/resync", s.resyncFBProfile)
+		admin.Delete("/fb-profiles/{id}", s.deleteFBProfile)
 
 		anyRole.Get("/ad-accounts", s.listAdAccounts)
 		anyRole.Get("/ad-accounts/{id}/snapshots", s.accountSnapshots)
 		admin.Get("/ad-accounts/{id}/assignments", s.accountAssignments)
 		admin.Post("/ad-accounts/{id}/assign", s.assignBuyer)
 		admin.Post("/ad-accounts/{id}/unassign", s.unassignBuyer)
-		admin.Patch("/ad-accounts/{id}", s.updateAdAccount)
+		admin.Patch("/ad-accounts/activity-status", s.updateAdAccountActivityStatus)
 
 		anyRole.Get("/snapshots", s.listSnapshots)
 
@@ -176,46 +182,6 @@ func (s *Server) listFBProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": profiles})
-}
-
-// resyncFBProfile re-pulls the profile's ad accounts with the stored token and
-// merges them into the tracking pool (new accounts are added, known ones are
-// refreshed, nothing is duplicated), then queues an immediate stats sync.
-func (s *Server) resyncFBProfile(w http.ResponseWriter, r *http.Request) {
-	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, errors.New("invalid profile id"))
-		return
-	}
-	profile, err := s.store.FBProfileByID(r.Context(), profileID)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	if profile == nil {
-		writeError(w, http.StatusNotFound, errors.New("fb profile not found"))
-		return
-	}
-	token, err := s.tokenCipher.Decrypt(profile.AccessTokenCiphertext)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	accounts, err := s.metaClient.AdAccounts(r.Context(), token)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	if err := s.store.UpsertAdAccountsForProfile(r.Context(), profile.ID, accounts); err != nil {
-		s.internalError(w, err)
-		return
-	}
-	if s.asynqClient != nil {
-		if err := worker.EnqueueSyncProfile(r.Context(), s.asynqClient, profile.ID, 0, s.syncInterval); err != nil {
-			log.Printf("enqueue sync for profile %d: %v", profile.ID, err)
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "resynced", "ad_accounts": accounts})
 }
 
 // oauthStateTTL bounds how long a started OAuth flow stays valid; the signed
@@ -336,6 +302,10 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	if err := s.store.MarkAccountResyncSuccess(r.Context(), profile.ID, time.Now().UTC()); err != nil {
+		s.internalError(w, err)
+		return
+	}
 
 	// First sync runs right away; afterwards the jittered scheduler owns the
 	// cadence. A failed enqueue is not worth failing the connect.
@@ -352,17 +322,31 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listAdAccounts(w http.ResponseWriter, r *http.Request) {
+	activityFilter, err := parseActivityFilter(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	claims, _ := auth.FromContext(r.Context())
 	var buyerID *int64
 	if claims.Role == domain.RoleBuyer {
 		buyerID = claims.BuyerID
 	}
-	accounts, err := s.store.ListAdAccounts(r.Context(), buyerID)
+	accounts, err := s.store.ListAdAccounts(r.Context(), buyerID, activityFilter)
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": accounts})
+	if err := s.attachNextUpdateToAdAccounts(r.Context(), accounts); err != nil {
+		s.internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity_filter": activityFilter,
+		"last_update_at":  maxLastUpdate(accounts),
+		"next_update_at":  nearestNextUpdate(accounts),
+		"data":            accounts,
+	})
 }
 
 // accountSnapshots returns the raw snapshots of one ad account. Buyers only
@@ -375,7 +359,13 @@ func (s *Server) accountSnapshots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := repository.SnapshotQuery{AdAccountID: &adAccountID, From: from, To: to}
+	activityFilter, err := parseActivityFilter(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	query := repository.SnapshotQuery{AdAccountID: &adAccountID, From: from, To: to, ActivityFilter: activityFilter}
 	claims, _ := auth.FromContext(r.Context())
 	if claims.Role == domain.RoleBuyer {
 		query.BuyerID = claims.BuyerID
@@ -386,7 +376,17 @@ func (s *Server) accountSnapshots(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": snapshots})
+	lastUpdateAt, nextUpdateAt, err := s.snapshotUpdateMetadata(r.Context(), snapshots)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity_filter": activityFilter,
+		"last_update_at":  lastUpdateAt,
+		"next_update_at":  nextUpdateAt,
+		"data":            snapshots,
+	})
 }
 
 // listSnapshots returns snapshots across accounts. Admins can filter by
@@ -399,7 +399,13 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := repository.SnapshotQuery{From: from, To: to}
+	activityFilter, err := parseActivityFilter(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	query := repository.SnapshotQuery{From: from, To: to, ActivityFilter: activityFilter}
 	if raw := r.URL.Query().Get("ad_account_id"); raw != "" {
 		query.AdAccountID = &raw
 	}
@@ -421,7 +427,17 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": snapshots})
+	lastUpdateAt, nextUpdateAt, err := s.snapshotUpdateMetadata(r.Context(), snapshots)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity_filter": activityFilter,
+		"last_update_at":  lastUpdateAt,
+		"next_update_at":  nextUpdateAt,
+		"data":            snapshots,
+	})
 }
 
 func (s *Server) accountAssignments(w http.ResponseWriter, r *http.Request) {
@@ -473,31 +489,49 @@ func (s *Server) unassignBuyer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "unassigned"})
 }
 
-type updateAdAccountRequest struct {
-	IsTracked *bool `json:"is_tracked"`
-}
-
-func (s *Server) updateAdAccount(w http.ResponseWriter, r *http.Request) {
-	adAccountID := chi.URLParam(r, "id")
-	var req updateAdAccountRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+func (s *Server) deleteFBProfile(w http.ResponseWriter, r *http.Request) {
+	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid profile id"))
 		return
 	}
-	if req.IsTracked == nil {
-		writeError(w, http.StatusBadRequest, errors.New("is_tracked is required"))
-		return
-	}
-	found, err := s.store.SetAdAccountTracked(r.Context(), adAccountID, *req.IsTracked)
+	found, err := s.store.DeleteFBProfile(r.Context(), profileID)
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
 	if !found {
-		writeError(w, http.StatusNotFound, errors.New("ad account not found"))
+		writeError(w, http.StatusNotFound, errors.New("fb profile not found"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "is_tracked": *req.IsTracked})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+}
+
+type updateAdAccountActivityStatusRequest struct {
+	AdAccountIDs   []string `json:"ad_account_ids"`
+	ActivityStatus string   `json:"activity_status"`
+}
+
+func (s *Server) updateAdAccountActivityStatus(w http.ResponseWriter, r *http.Request) {
+	var req updateAdAccountActivityStatusRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.AdAccountIDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("ad_account_ids is required"))
+		return
+	}
+	if !repository.ValidActivityStatus(req.ActivityStatus) {
+		writeError(w, http.StatusBadRequest, errors.New("activity_status must be active or inactive"))
+		return
+	}
+	updated, missing, err := s.store.SetAdAccountActivityStatus(r.Context(), req.AdAccountIDs, req.ActivityStatus)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "missing_ids": missing})
 }
 
 func (s *Server) listAlerts(w http.ResponseWriter, r *http.Request) {
@@ -516,6 +550,88 @@ func (s *Server) listAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": alerts})
+}
+
+func parseActivityFilter(r *http.Request) (repository.ActivityFilter, error) {
+	return repository.ParseActivityFilter(r.URL.Query().Get("activity_filter"))
+}
+
+func (s *Server) attachNextUpdateToAdAccounts(ctx context.Context, accounts []repository.AdAccountListItem) error {
+	ids := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		ids = append(ids, account.ID)
+	}
+	nextUpdates, err := s.store.NextUpdateTimes(ctx, ids, s.syncBatchSize, s.syncInterval, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	for i := range accounts {
+		accounts[i].NextUpdateAt = nextUpdates[accounts[i].ID]
+	}
+	return nil
+}
+
+func (s *Server) snapshotUpdateMetadata(ctx context.Context, snapshots []domain.StatSnapshot) (*time.Time, *time.Time, error) {
+	var lastUpdateAt *time.Time
+	seen := map[string]struct{}{}
+	ids := []string{}
+	for _, snapshot := range snapshots {
+		if lastUpdateAt == nil || snapshot.CapturedAt.After(*lastUpdateAt) {
+			t := snapshot.CapturedAt
+			lastUpdateAt = &t
+		}
+		if _, ok := seen[snapshot.AdAccountID]; !ok {
+			seen[snapshot.AdAccountID] = struct{}{}
+			ids = append(ids, snapshot.AdAccountID)
+		}
+	}
+	nextUpdates, err := s.store.NextUpdateTimes(ctx, ids, s.syncBatchSize, s.syncInterval, time.Now().UTC())
+	if err != nil {
+		return nil, nil, err
+	}
+	return lastUpdateAt, nearestTime(nextUpdates), nil
+}
+
+func nearestTime(times map[string]*time.Time) *time.Time {
+	var nearest *time.Time
+	for _, candidate := range times {
+		if candidate == nil {
+			continue
+		}
+		if nearest == nil || candidate.Before(*nearest) {
+			t := *candidate
+			nearest = &t
+		}
+	}
+	return nearest
+}
+
+func nearestNextUpdate(accounts []repository.AdAccountListItem) *time.Time {
+	var nearest *time.Time
+	for _, account := range accounts {
+		if account.NextUpdateAt == nil {
+			continue
+		}
+		if nearest == nil || account.NextUpdateAt.Before(*nearest) {
+			t := *account.NextUpdateAt
+			nearest = &t
+		}
+	}
+	return nearest
+}
+
+func maxLastUpdate(accounts []repository.AdAccountListItem) *time.Time {
+	var latest *time.Time
+	for _, account := range accounts {
+		if account.LastUpdateAt == nil {
+			continue
+		}
+		if latest == nil || account.LastUpdateAt.After(*latest) {
+			t := *account.LastUpdateAt
+			latest = &t
+		}
+	}
+	return latest
 }
 
 func parseTimeRange(r *http.Request) (time.Time, time.Time, error) {

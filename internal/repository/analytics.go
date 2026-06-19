@@ -13,10 +13,11 @@ import (
 // result includes the latest snapshot before From for every account in the
 // range, so callers can turn cumulative Meta values into interval deltas.
 type AnalyticsSnapshotQuery struct {
-	AdAccountID *string
-	BuyerID     *int64
-	From        time.Time
-	To          time.Time
+	AdAccountID    *string
+	BuyerID        *int64
+	ActivityFilter ActivityFilter
+	From           time.Time
+	To             time.Time
 }
 
 func (s *Store) AnalyticsSnapshots(ctx context.Context, q AnalyticsSnapshotQuery) ([]domain.StatSnapshot, error) {
@@ -38,17 +39,25 @@ func (s *Store) AnalyticsSnapshots(ctx context.Context, q AnalyticsSnapshotQuery
 	if q.BuyerID != nil {
 		previousConditions = append(previousConditions, buyerSnapshotCondition("s", len(args)))
 	}
+	if q.ActivityFilter != ActivityFilterAll && q.ActivityFilter != "" {
+		args = append(args, string(q.ActivityFilter))
+		activityCondition := fmt.Sprintf("a.activity_status = $%d", len(args))
+		conditions = append(conditions, activityCondition)
+		previousConditions = append(previousConditions, activityCondition)
+	}
 
 	query := fmt.Sprintf(`
 		WITH base_accounts AS (
 			SELECT DISTINCT s.ad_account_id
 			FROM account_stat_snapshots s
+			JOIN ad_accounts a ON a.id = s.ad_account_id
 			WHERE %s
 		),
 		in_range AS (
 			SELECT s.id, s.ad_account_id, s.captured_at, s.meta_date,
 			       s.spend, s.impressions, s.clicks, s.reach, s.frequency, s.cpc, s.cpm, s.ctr
 			FROM account_stat_snapshots s
+			JOIN ad_accounts a ON a.id = s.ad_account_id
 			WHERE %s
 		),
 		previous AS (
@@ -56,6 +65,7 @@ func (s *Store) AnalyticsSnapshots(ctx context.Context, q AnalyticsSnapshotQuery
 			       s.id, s.ad_account_id, s.captured_at, s.meta_date,
 			       s.spend, s.impressions, s.clicks, s.reach, s.frequency, s.cpc, s.cpm, s.ctr
 			FROM account_stat_snapshots s
+			JOIN ad_accounts a ON a.id = s.ad_account_id
 			JOIN base_accounts ba ON ba.ad_account_id = s.ad_account_id
 			WHERE %s
 			ORDER BY s.ad_account_id, s.captured_at DESC
@@ -124,28 +134,36 @@ type AccountFreshness struct {
 	AdAccountID        string     `json:"ad_account_id"`
 	Name               string     `json:"name"`
 	IsTracked          bool       `json:"is_tracked"`
+	ActivityStatus     string     `json:"activity_status"`
 	CurrentBuyerID     *int64     `json:"current_buyer_id,omitempty"`
 	CurrentBuyerName   *string    `json:"current_buyer_name,omitempty"`
 	LastSnapshotAt     *time.Time `json:"last_snapshot_at,omitempty"`
+	LastUpdateAt       *time.Time `json:"last_update_at,omitempty"`
+	NextUpdateAt       *time.Time `json:"next_update_at,omitempty"`
 	LastSnapshotAgeSec *int64     `json:"last_snapshot_age_seconds,omitempty"`
 	FreshnessStatus    string     `json:"freshness_status"`
 }
 
-func (s *Store) AccountFreshness(ctx context.Context, buyerID *int64, staleAfter time.Duration) ([]AccountFreshness, error) {
+func (s *Store) AccountFreshness(ctx context.Context, buyerID *int64, activityFilter ActivityFilter, staleAfter time.Duration) ([]AccountFreshness, error) {
 	args := []any{}
-	filter := ""
+	conditions := []string{}
 	if buyerID != nil {
 		args = append(args, *buyerID)
-		filter = "WHERE h.buyer_id = $1"
+		conditions = append(conditions, fmt.Sprintf("h.buyer_id = $%d", len(args)))
+	}
+	conditions = AppendActivityFilter(conditions, &args, "a", activityFilter)
+	filter := ""
+	if len(conditions) > 0 {
+		filter = "WHERE " + strings.Join(conditions, " AND ")
 	}
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
-		SELECT a.id, a.name, a.is_tracked, h.buyer_id, b.display_name, max(s.captured_at)
+		SELECT a.id, a.name, a.is_tracked, a.activity_status, h.buyer_id, b.display_name, max(s.captured_at)
 		FROM ad_accounts a
 		LEFT JOIN buyer_account_history h ON h.ad_account_id = a.id AND h.unassigned_at IS NULL
 		LEFT JOIN buyers b ON b.id = h.buyer_id
 		LEFT JOIN account_stat_snapshots s ON s.ad_account_id = a.id
 		%s
-		GROUP BY a.id, a.name, a.is_tracked, h.buyer_id, b.display_name
+		GROUP BY a.id, a.name, a.is_tracked, a.activity_status, h.buyer_id, b.display_name
 		ORDER BY a.id
 	`, filter), args...)
 	if err != nil {
@@ -157,9 +175,10 @@ func (s *Store) AccountFreshness(ctx context.Context, buyerID *int64, staleAfter
 	items := []AccountFreshness{}
 	for rows.Next() {
 		var item AccountFreshness
-		if err := rows.Scan(&item.AdAccountID, &item.Name, &item.IsTracked, &item.CurrentBuyerID, &item.CurrentBuyerName, &item.LastSnapshotAt); err != nil {
+		if err := rows.Scan(&item.AdAccountID, &item.Name, &item.IsTracked, &item.ActivityStatus, &item.CurrentBuyerID, &item.CurrentBuyerName, &item.LastSnapshotAt); err != nil {
 			return nil, err
 		}
+		item.LastUpdateAt = item.LastSnapshotAt
 		item.FreshnessStatus = "never_synced"
 		if item.LastSnapshotAt != nil {
 			age := int64(now.Sub(item.LastSnapshotAt.UTC()).Seconds())

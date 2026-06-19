@@ -59,13 +59,13 @@ goose -dir migrations postgres "$DATABASE_URL" up
 - `GET /api/fb-profiles/oauth/start` — returns the Facebook Login URL (admin)
 - `GET /oauth/facebook/callback` — Facebook redirect target (no auth header; validated by signed state)
 - `GET /api/fb-profiles` (admin)
-- `POST /api/fb-profiles/{id}/resync` — re-pull the profile's ad accounts with the stored token and queue a stats sync (admin)
-- `GET /api/ad-accounts` — with current buyer; buyers see only their own
-- `GET /api/ad-accounts/{id}/snapshots?from=&to=` — snapshots of one account; buyers only get their ownership intervals
+- `DELETE /api/fb-profiles/{id}` — remove the connected FB profile; ad accounts and historical snapshots are preserved (admin)
+- `GET /api/ad-accounts?activity_filter=all|active|inactive` — with current buyer, `last_update_at`, and `next_update_at`; buyers see only their own; default filter is `all`
+- `GET /api/ad-accounts/{id}/snapshots?from=&to=&activity_filter=` — snapshots of one account; buyers only get their ownership intervals
 - `GET /api/ad-accounts/{id}/assignments` — ownership history (admin)
 - `POST /api/ad-accounts/{id}/assign`, `POST /api/ad-accounts/{id}/unassign` (admin)
-- `PATCH /api/ad-accounts/{id}` — `{"is_tracked": false}` (admin)
-- `GET /api/snapshots?from=&to=&buyer_id=&ad_account_id=` — snapshots across accounts; buyers are always limited to their own ownership intervals
+- `PATCH /api/ad-accounts/activity-status` — bulk set `{"ad_account_ids": ["act_..."], "activity_status": "active|inactive"}` (admin)
+- `GET /api/snapshots?from=&to=&buyer_id=&ad_account_id=&activity_filter=` — snapshots across accounts; buyers are always limited to their own ownership intervals
 - `GET /api/alerts?limit=` (admin)
 
 All `/api/*` endpoints require `Authorization: Bearer <jwt>`.
@@ -84,6 +84,28 @@ Common query parameters:
 - `timezone` — IANA timezone for bucket labels and period pacing, default `UTC`
 - `granularity` — `hour` or `day`, default `hour`
 - `buyer_id`, `ad_account_id` — admin filters; buyers are always forced to their own `buyer_id`
+- `activity_filter` — `all`, `active`, or `inactive`; default `all`; filters account rows and KPI aggregation without affecting background sync
+
+
+Update metadata contract:
+
+- Account objects include `activity_status`, `last_update_at`, and `next_update_at`.
+- Aggregate/stat JSON responses include root-level `activity_filter`, `last_update_at`, and `next_update_at`.
+- `last_update_at` is the latest snapshot timestamp in the selected result set.
+- `next_update_at` is an estimate based on the current round-robin cursor, `SYNC_BATCH_SIZE`, and `SYNC_BATCH_DELAY`.
+- `inactive` accounts remain synced in the background; the status only affects API filtering and aggregation.
+
+Admin examples:
+
+```bash
+curl -X PATCH "$API/api/ad-accounts/activity-status" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ad_account_ids":["act_1000360982703034"],"activity_status":"inactive"}'
+
+curl -X DELETE "$API/api/fb-profiles/1" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
 
 Endpoints:
 
@@ -101,11 +123,14 @@ Endpoints:
 
 ## Snapshots
 
-Every active FB profile is synced in round-robin chunks to stay under Meta
-Marketing API development-tier limits. By default the worker processes
-`SYNC_BATCH_SIZE=60` tracked ad accounts every `SYNC_BATCH_DELAY=10m`; with 543
-accounts that is roughly a 100 minute full cycle. The cursor is persisted in
-PostgreSQL, so restarts continue from the next chunk rather than starting over.
+Every active FB profile refreshes its ad-account list automatically once per
+UTC day. OAuth connect imports the initial account list immediately; afterwards
+the scheduler performs the daily account-list resync at the first tick of each
+new UTC date and then continues round-robin snapshot chunks until the next day.
+By default the worker processes `SYNC_BATCH_SIZE=60` tracked ad accounts every
+`SYNC_BATCH_DELAY=10m`; the full-cycle time shifts with the number of accounts.
+The cursor is persisted in PostgreSQL, so restarts continue from the next chunk
+rather than starting over.
 
 A sync captures, per tracked ad account, the cumulative daily metrics at that
 exact moment (`captured_at`): spend, impressions, clicks, reach, frequency,

@@ -190,14 +190,16 @@ func (p *Processor) handleSyncError(ctx context.Context, profile *repository.Syn
 const expiryAlertWindow = 7 * 24 * time.Hour
 
 type Scheduler struct {
-	store    *repository.Store
-	client   *asynq.Client
-	telegram *telegram.Client
-	interval time.Duration
+	store       *repository.Store
+	client      *asynq.Client
+	metaClient  *meta.Client
+	tokenCipher *crypto.TokenCipher
+	telegram    *telegram.Client
+	interval    time.Duration
 }
 
-func NewScheduler(store *repository.Store, client *asynq.Client, telegramClient *telegram.Client, interval time.Duration) *Scheduler {
-	return &Scheduler{store: store, client: client, telegram: telegramClient, interval: interval}
+func NewScheduler(store *repository.Store, client *asynq.Client, metaClient *meta.Client, tokenCipher *crypto.TokenCipher, telegramClient *telegram.Client, interval time.Duration) *Scheduler {
+	return &Scheduler{store: store, client: client, metaClient: metaClient, tokenCipher: tokenCipher, telegram: telegramClient, interval: interval}
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -221,16 +223,58 @@ func (s *Scheduler) Run(ctx context.Context) error {
 func (s *Scheduler) enqueueOnce(ctx context.Context) error {
 	s.alertExpiringTokens(ctx)
 
+	now := time.Now().UTC()
+	today := utcDate(now)
 	profiles, err := s.store.ActiveProfiles(ctx)
 	if err != nil {
 		return err
 	}
 	for _, profile := range profiles {
+		if needsDailyAccountResync(profile.LastAccountResyncDate, today) {
+			if err := s.resyncProfileAccounts(ctx, profile, now); err != nil {
+				log.Printf("daily account resync for profile %d: %v", profile.ID, err)
+				continue
+			}
+		}
 		if err := EnqueueSyncProfile(ctx, s.client, profile.ID, 0, s.interval); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Scheduler) resyncProfileAccounts(ctx context.Context, profile repository.SyncProfile, now time.Time) error {
+	token, err := s.tokenCipher.Decrypt(profile.AccessTokenCiphertext)
+	if err != nil {
+		_ = s.store.MarkAccountResyncFailure(ctx, profile.ID, err.Error())
+		return err
+	}
+	accounts, err := s.metaClient.AdAccounts(ctx, token)
+	if err != nil {
+		_ = s.store.MarkAccountResyncFailure(ctx, profile.ID, err.Error())
+		return err
+	}
+	if err := s.store.UpsertAdAccountsForProfile(ctx, profile.ID, accounts); err != nil {
+		_ = s.store.MarkAccountResyncFailure(ctx, profile.ID, err.Error())
+		return err
+	}
+	if err := s.store.MarkAccountResyncSuccess(ctx, profile.ID, now); err != nil {
+		return err
+	}
+	log.Printf("daily account resync for profile %d: imported %d account(s)", profile.ID, len(accounts))
+	return nil
+}
+
+func needsDailyAccountResync(lastDate *time.Time, today time.Time) bool {
+	if lastDate == nil {
+		return true
+	}
+	return !utcDate(lastDate.UTC()).Equal(today)
+}
+
+func utcDate(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // alertExpiringTokens warns once per profile when its long-lived token nears

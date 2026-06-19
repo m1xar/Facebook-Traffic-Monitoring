@@ -50,7 +50,7 @@ func main() {
 	if mode == "scheduler" || mode == "all" {
 		client := asynq.NewClient(redisOpt)
 		defer client.Close()
-		scheduler := worker.NewScheduler(store, client, telegramClient, cfg.SyncBatchDelay)
+		scheduler := worker.NewScheduler(store, client, metaClient, tokenCipher, telegramClient, cfg.SyncBatchDelay)
 		go func() {
 			if err := scheduler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("scheduler stopped: %v", err)
