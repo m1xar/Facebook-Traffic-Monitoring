@@ -229,18 +229,26 @@ func (s *Scheduler) enqueueOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, profile := range profiles {
+	for i, profile := range profiles {
 		if needsDailyAccountResync(profile.LastAccountResyncDate, today) {
 			if err := s.resyncProfileAccounts(ctx, profile, now); err != nil {
 				log.Printf("daily account resync for profile %d: %v", profile.ID, err)
 				continue
 			}
 		}
-		if err := EnqueueSyncProfile(ctx, s.client, profile.ID, 0, s.interval); err != nil {
+		delay := staggerDelay(i, len(profiles), s.interval)
+		if err := EnqueueSyncProfile(ctx, s.client, profile.ID, delay, s.interval); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func staggerDelay(index, total int, interval time.Duration) time.Duration {
+	if index <= 0 || total <= 1 || interval <= 0 {
+		return 0
+	}
+	return time.Duration(index) * (interval / time.Duration(total))
 }
 
 func (s *Scheduler) resyncProfileAccounts(ctx context.Context, profile repository.SyncProfile, now time.Time) error {

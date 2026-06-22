@@ -59,7 +59,7 @@ func main() {
 	}
 
 	if mode == "server" || mode == "all" {
-		server := asynq.NewServer(redisOpt, asynq.Config{Concurrency: 5})
+		server := asynq.NewServer(redisOpt, asynq.Config{Concurrency: 1})
 		mux := asynq.NewServeMux()
 		processor := worker.NewProcessor(store, metaClient, tokenCipher, telegramClient, cfg.SyncBatchSize)
 		processor.Register(mux)

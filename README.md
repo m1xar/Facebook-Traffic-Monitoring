@@ -125,8 +125,10 @@ Every active FB profile refreshes its ad-account list automatically once per
 UTC day. OAuth connect imports the initial account list immediately; afterwards
 the scheduler performs the daily account-list resync at the first tick of each
 new UTC date and then continues round-robin snapshot chunks until the next day.
-By default the worker processes `SYNC_BATCH_SIZE=60` tracked ad accounts every
-`SYNC_BATCH_DELAY=10m`; the full-cycle time shifts with the number of accounts.
+By default the worker processes `SYNC_BATCH_SIZE=40` tracked ad accounts per
+profile every `SYNC_BATCH_DELAY=10m`. Profile sync jobs are staggered evenly
+across the delay window, so multiple connected Facebook profiles do not all hit
+Meta at the same moment.
 The cursor is persisted in PostgreSQL, so restarts continue from the next chunk
 rather than starting over.
 

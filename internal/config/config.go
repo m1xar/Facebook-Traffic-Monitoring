@@ -61,7 +61,7 @@ func Load() (Config, error) {
 		}
 		cfg.SyncInterval = interval
 	}
-	cfg.SyncBatchSize = 60
+	cfg.SyncBatchSize = 40
 	if raw := os.Getenv("SYNC_BATCH_SIZE"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil {
